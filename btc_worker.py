@@ -6,6 +6,7 @@ BTC Autonomous Paper Trading Worker + Status API
 - Exposes a simple HTTP endpoint so a local dashboard can read live state
 
 Deploy on Railway / Fly.io.
+Important: The trading loop starts automatically even when run under gunicorn.
 """
 
 import yfinance as yf
@@ -113,6 +114,7 @@ def run_once(state):
 
     if state.get("last_bar_time") == bar_time:
         state["status"] = "waiting_for_new_bar"
+        state["last_price"] = price
         return state
 
     # Manage open position
@@ -182,16 +184,16 @@ def run_once(state):
 
 # ====================== BACKGROUND WORKER ======================
 def worker_loop():
-    print("Worker loop started")
+    print("Worker loop started", flush=True)
     while True:
         try:
             state = load_state()
             state = run_once(state)
             save_state(state)
             pos = "LONG" if state["position"] == 1 else "FLAT"
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] {pos} | Equity ${state['equity']:.2f} | Trades {len(state.get('trades', []))}")
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] {pos} | Equity ${state['equity']:.2f} | Trades {len(state.get('trades', []))} | status={state.get('status')}", flush=True)
         except Exception as e:
-            print(f"Worker error: {e}")
+            print(f"Worker error: {e}", flush=True)
         time.sleep(CHECK_INTERVAL)
 
 # ====================== FLASK STATUS API ======================
@@ -214,15 +216,27 @@ def health():
 @app.route("/status")
 def status():
     state = load_state()
-    # Return a clean summary + full data
     return jsonify(state)
 
-# ====================== MAIN ======================
-if __name__ == "__main__":
-    # Start the trading loop in a background thread
-    t = threading.Thread(target=worker_loop, daemon=True)
-    t.start()
+# ====================== START WORKER THREAD (works with gunicorn too) ======================
+_worker_started = False
+_worker_lock = threading.Lock()
 
+def start_worker_once():
+    global _worker_started
+    with _worker_lock:
+        if not _worker_started:
+            t = threading.Thread(target=worker_loop, daemon=True)
+            t.start()
+            _worker_started = True
+            print("Background trading thread launched", flush=True)
+
+# Start the trading loop as soon as this module is imported
+# (this is what makes it work under gunicorn)
+start_worker_once()
+
+# ====================== MAIN (for local python btc_worker.py) ======================
+if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
-    print(f"Starting status server on port {port}")
+    print(f"Starting status server on port {port}", flush=True)
     app.run(host="0.0.0.0", port=port)
